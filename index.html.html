@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MTG Artist Finder</title>
+<style>
+:root{--bg:#f3f5f8;--surface:#fff;--ink:#1b2433;--muted:#5d6b82;--line:#d5dbe5;--accent:#2a4d9b;--accent-ink:#fff;--warn:#9a5b00}
+@media (prefers-color-scheme:dark){:root{--bg:#10151f;--surface:#18202e;--ink:#e6eaf2;--muted:#93a0b8;--line:#2b3649;--accent:#7fa4f0;--accent-ink:#0d1626;--warn:#e8b24f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Georgia,"Times New Roman",serif}
+main{max-width:1100px;margin:0 auto;padding:28px 18px 60px}
+h1{font-size:2rem;margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--muted);margin:0 0 24px;font-family:system-ui,sans-serif;font-size:.95rem}
+.panels{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:760px){.panels{grid-template-columns:1fr}}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px}
+label{display:block;font:600 .95rem system-ui,sans-serif;margin-bottom:6px}
+textarea,input{width:100%;font:inherit;font-size:.95rem;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px}
+textarea{height:190px;resize:vertical}
+input{margin-bottom:8px}
+textarea.small{height:80px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;min-height:28px;margin-bottom:8px}
+.chip{display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:var(--accent-ink);border-radius:999px;padding:2px 6px 2px 12px;font:.85rem system-ui,sans-serif}
+.chip button{all:unset;cursor:pointer;padding:0 6px;font-size:1.1rem;line-height:1}
+.row{display:flex;align-items:center;gap:14px;margin:16px 0}
+button.go{font:600 1rem system-ui,sans-serif;background:var(--accent);color:var(--accent-ink);border:0;border-radius:8px;padding:10px 22px;cursor:pointer}
+button.go:disabled{opacity:.5;cursor:wait}
+#status{font:.9rem system-ui,sans-serif;color:var(--muted)}
+#status.err{color:var(--warn)}
+.artist{margin-top:30px}
+.artist h2{font-size:1.4rem;margin:0 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px}
+.artist h2 span{font:.9rem system-ui,sans-serif;color:var(--muted);margin-left:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.card{display:block;text-decoration:none;color:var(--muted);font:.8rem system-ui,sans-serif}
+.card img{width:100%;border-radius:4.5%;display:block;background:var(--line);aspect-ratio:488/680}
+.card small{display:block;margin-top:3px}
+.none{margin-top:30px;font:.9rem system-ui,sans-serif;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+<h1>MTG Artist Finder</h1>
+<p class="sub">Paste your card list, pick artists, and see which of your cards each artist illustrated. Data from Scryfall.</p>
+
+<div class="panels">
+  <div class="panel">
+    <label for="cards">Card list</label>
+    <textarea id="cards" placeholder="Lightning Bolt&#10;Sol Ring (C21) 263&#10;Counterspell"></textarea>
+  </div>
+  <div class="panel">
+    <label for="artistPick">Pick artists from the list</label>
+    <input id="artistPick" list="artistNames" placeholder="Start typing an artist name, press Enter to add" autocomplete="off">
+    <datalist id="artistNames"></datalist>
+    <div class="chips" id="chips"></div>
+    <label for="artistPaste">Or paste artists (one per line or comma-separated)</label>
+    <textarea id="artistPaste" class="small" placeholder="Rebecca Guay&#10;Mark Tedin"></textarea>
+  </div>
+</div>
+
+<div class="row">
+  <button class="go" id="go">Find cards</button>
+  <span id="status" role="status"></span>
+</div>
+<div id="results"></div>
+</main>
+
+<script>
+const API = "https://api.scryfall.com";
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let catalog = [];            // all artist names
+const picked = new Set();    // chosen artists
+
+function status(msg, err){ const s=$("status"); s.textContent=msg; s.className=err?"err":""; }
+
+async function api(url){
+  for(let attempt=0; attempt<4; attempt++){
+    await sleep(110);
+    const res = await fetch(url, {headers:{Accept:"application/json"}});
+    if(res.status===404) return null;                       // no matches
+    if(res.status===429){ await sleep(1500*(attempt+1)); continue; }
+    if(!res.ok) throw new Error("Scryfall error "+res.status);
+    return res.json();
+  }
+  throw new Error("Scryfall is rate limiting requests. Wait a moment and try again.");
+}
+
+/* ---- artist dropdown ---- */
+async function loadArtists(){
+  try{
+    const data = await api(API+"/catalog/artist-names");
+    catalog = data.data;
+    $("artistNames").innerHTML = catalog.map(n=>`<option value="${n.replace(/"/g,"&quot;")}">`).join("");
+  }catch(e){ status("Could not load the artist list. You can still paste artist names.", true); }
+}
+function renderChips(){
+  const box=$("chips"); box.innerHTML="";
+  picked.forEach(name=>{
+    const c=document.createElement("span"); c.className="chip"; c.textContent=name;
+    const x=document.createElement("button"); x.type="button"; x.textContent="\u00d7"; x.setAttribute("aria-label","Remove "+name);
+    x.onclick=()=>{picked.delete(name); renderChips();};
+    c.appendChild(x); box.appendChild(c);
+  });
+}
+function addPicked(){
+  const v=$("artistPick").value.trim(); if(!v) return;
+  const hit=catalog.find(n=>n.toLowerCase()===v.toLowerCase());
+  if(hit){ picked.add(hit); renderChips(); $("artistPick").value=""; }
+}
+$("artistPick").addEventListener("change", addPicked);
+$("artistPick").addEventListener("keydown", e=>{ if(e.key==="Enter"){ e.preventDefault(); addPicked(); }});
+
+/* ---- parsing ---- */
+function parseCards(text){
+  const skip=/^(deck|sideboard|commander|companion|maybeboard|mainboard|main|side)\b:?$/i;
+  const names=new Set();
+  for(let line of text.split(/\r?\n/)){
+    line=line.trim();
+    if(!line || line.startsWith("//") || line.startsWith("#") || skip.test(line)) continue;
+    line=line.replace(/^\d+\s*x?\s+/i,"")        // quantity
+             .replace(/\s*\*[A-Za-z]+\*/g,"")     // *F* markers
+             .replace(/\s+\([A-Za-z0-9]{2,6}\)(\s+\S+)?\s*$/,"") // (SET) 123
+             .replace(/\s+\[[^\]]*\]\s*$/,"")
+             .split(" // ")[0].replace(/"/g,"").trim();
+    if(line) names.add(line);
+  }
+  return [...names];
+}
+function parseArtists(text){
+  const out=[], unknown=[];
+  text.split(/[\n,;]+/).map(s=>s.trim()).filter(Boolean).forEach(n=>{
+    if(!catalog.length){ out.push(n); return; }
+    const hit=catalog.find(c=>c.toLowerCase()===n.toLowerCase());
+    hit?out.push(hit):unknown.push(n);
+  });
+  return {out,unknown};
+}
+
+/* ---- search ---- */
+function chunkNames(names, artist){
+  const chunks=[]; let cur=[], len=0; const base=artist.length+30;
+  for(const n of names){
+    const part=`!"${n}"`.length+4;
+    if(cur.length && (len+part+base>850 || cur.length>=20)){ chunks.push(cur); cur=[]; len=0; }
+    cur.push(n); len+=part;
+  }
+  if(cur.length) chunks.push(cur);
+  return chunks;
+}
+async function searchArtist(artist, names){
+  const found=new Map();   // key: name + illustration -> {card, sets}
+  for(const chunk of chunkNames(names, artist)){
+    const q=`a:"${artist}" (${chunk.map(n=>`!"${n}"`).join(" or ")})`;
+    let url=`${API}/cards/search?q=${encodeURIComponent(q)}&unique=prints&order=released`;
+    while(url){
+      const data=await api(url); if(!data) break;
+      for(const c of data.data){
+        if(!(c.artist||"").toLowerCase().includes(artist.toLowerCase())) continue; // multi-face artist check
+        const key=c.name+"|"+(c.illustration_id||c.card_faces?.[0]?.illustration_id||c.id);
+        if(!found.has(key)) found.set(key,{card:c,sets:new Set()});
+        found.get(key).sets.add(c.set.toUpperCase());
+      }
+      url=data.has_more?data.next_page:null;
+    }
+  }
+  return [...found.values()];
+}
+
+function imgOf(c){ return (c.image_uris||c.card_faces?.[0]?.image_uris||{}).normal||""; }
+
+function render(results, names){
+  const box=$("results"); box.innerHTML=""; const matched=new Set();
+  results.forEach(({artist,items})=>{
+    const sec=document.createElement("section"); sec.className="artist";
+    const h=document.createElement("h2"); h.textContent=artist;
+    const cnt=document.createElement("span"); cnt.textContent=items.length+(items.length===1?" artwork":" artworks");
+    h.appendChild(cnt); sec.appendChild(h);
+    if(!items.length){ const p=document.createElement("p"); p.className="none"; p.textContent="No cards from your list by this artist."; sec.appendChild(p); }
+    const grid=document.createElement("div"); grid.className="grid";
+    items.forEach(({card,sets})=>{
+      matched.add(card.name.split(" // ")[0].toLowerCase());
+      const a=document.createElement("a"); a.className="card"; a.href=card.scryfall_uri; a.target="_blank"; a.rel="noopener";
+      const im=document.createElement("img"); im.loading="lazy"; im.src=imgOf(card); im.alt=card.name;
+      const s=document.createElement("small"); s.textContent=card.name+" \u2013 "+[...sets].slice(0,6).join(", ")+(sets.size>6?"\u2026":"");
+      a.append(im,s); grid.appendChild(a);
+    });
+    sec.appendChild(grid); box.appendChild(sec);
+  });
+  const missing=names.filter(n=>!matched.has(n.toLowerCase()));
+  if(missing.length){
+    const p=document.createElement("p"); p.className="none";
+    p.textContent="Not illustrated by any selected artist: "+missing.join(", ");
+    box.appendChild(p);
+  }
+}
+
+$("go").addEventListener("click", async ()=>{
+  const names=parseCards($("cards").value);
+  const {out,unknown}=parseArtists($("artistPaste").value);
+  const artists=[...new Set([...picked,...out])];
+  if(!names.length) return status("Paste at least one card name.", true);
+  if(!artists.length) return status("Pick or paste at least one artist.", true);
+  const btn=$("go"); btn.disabled=true; $("results").innerHTML="";
+  const results=[];
+  try{
+    for(let i=0;i<artists.length;i++){
+      status(`Searching ${artists[i]} (${i+1} of ${artists.length})\u2026`);
+      results.push({artist:artists[i], items:await searchArtist(artists[i], names)});
+    }
+    render(results, names);
+    status(unknown.length?`Done. Unknown artist names skipped: ${unknown.join(", ")}`:"Done.", unknown.length>0);
+  }catch(e){ render(results, names); status(e.message||"Something went wrong.", true); }
+  btn.disabled=false;
+});
+
+loadArtists();
+</script>
+</body>
+</html>
